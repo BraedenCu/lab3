@@ -27,38 +27,43 @@ const int encoderCLK = 3;
 
 // State for encoder decoding
 volatile int8_t   lastEnc    = 0;
-volatile uint16_t encoderVal = 128;  // range 0–255
+volatile int16_t  encoderVal = 128;  // 0–255, wraps
 
 // Ball state
 int x  = 64, y  = 32;
-int vx = 1,  vy = 1;
+int vx = 0,  vy = 0;
 const int R      = 4;
-const int maxVel = 5;
+const int maxVel = 10;    // max ticks per frame → max speed
 
-// ISR to update encoder value
+// track previous frame’s encoderVal for delta
+int16_t prevEnc = 128;
+
+// ISR to update encoderVal with wrap-around
 void updateEncoder() {
   int msb     = digitalRead(encoderCLK);
   int lsb     = digitalRead(encoderDT);
   int encoded = (msb << 1) | lsb;
   int sum     = (lastEnc << 2) | encoded;
 
-  // Gray-code decoding
   if (sum == 0b1101 || sum == 0b0100 ||
       sum == 0b0010 || sum == 0b1011) {
+    // forward
     encoderVal++;
+    if (encoderVal > 255) encoderVal = 0;
   }
   if (sum == 0b1110 || sum == 0b0111 ||
       sum == 0b0001 || sum == 0b1000) {
+    // reverse
     encoderVal--;
+    if (encoderVal < 0) encoderVal = 255;
   }
-  encoderVal = constrain(encoderVal, 0, 255);
-  lastEnc    = encoded;
+  lastEnc = encoded;
 }
 
 void setup() {
   Serial.begin(9600);
 
-  // initialize OLED
+  // OLED init
   if (!disp.begin(SSD1306_SWITCHCAPVCC)) {
     while (1);
   }
@@ -72,24 +77,53 @@ void setup() {
 }
 
 void loop() {
-  // map 0–255 → –maxVel…+maxVel
-  int speed = map(encoderVal, 0, 255, -maxVel, maxVel);
+  // compute ticks since last frame
+  int16_t delta = encoderVal - prevEnc;
+  // handle wrap in delta
+  if (delta > 128)  delta -= 256;
+  if (delta < -128) delta += 256;
+  prevEnc = encoderVal;
+
+  // velocity = direction * magnitude, capped at maxVel
+  int speed = constrain(delta, -maxVel, maxVel);
   vx = speed;
   vy = speed;
 
-  // update ball
-  x += vx;  if (x < R || x > SCREEN_WIDTH  - R) vx = -vx;
-  y += vy;  if (y < R || y > SCREEN_HEIGHT - R) vy = -vy;
+  // X collision
+  int nextX = x + vx;
+  if (nextX <= R) {
+    x  = R;
+    vx = -vx;
+  } else if (nextX >= SCREEN_WIDTH - R) {
+    x  = SCREEN_WIDTH - R;
+    vx = -vx;
+  } else {
+    x = nextX;
+  }
+
+  // Y collision
+  int nextY = y + vy;
+  if (nextY <= R) {
+    y  = R;
+    vy = -vy;
+  } else if (nextY >= SCREEN_HEIGHT - R) {
+    y  = SCREEN_HEIGHT - R;
+    vy = -vy;
+  } else {
+    y = nextY;
+  }
 
   // render
   disp.clearDisplay();
   disp.fillCircle(x, y, R, SSD1306_WHITE);
   disp.display();
 
-  // debug output
-  Serial.print("Encoder Value: ");
+  // debug
+  Serial.print("Enc: ");
   Serial.print(encoderVal);
-  Serial.print("   Speed: ");
+  Serial.print("  Δticks: ");
+  Serial.print(delta);
+  Serial.print("  Speed: ");
   Serial.println(speed);
 
   delay(50);  // ~20 FPS
